@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DOOM-ish: Tyler’s Problem</title>
+<style>
+  * { box-sizing: border-box }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #100d12; color: #eee; font: 14px system-ui, sans-serif;
+  }
+  main { width: min(96vw, 960px); text-align: center }
+  h1 { margin: 8px; color: #ff4938; letter-spacing: .14em }
+  canvas {
+    display: block; width: 100%; aspect-ratio: 8 / 5;
+    background: #19151a; border: 3px solid #55434a; cursor: crosshair;
+    image-rendering: pixelated;
+  }
+  p { color: #c9bec2; line-height: 1.6 }
+  kbd { background: #33282e; padding: 2px 6px; border-radius: 4px }
+</style>
+<main>
+  <h1>DOOM-ISH</h1>
+  <canvas id="game" width="960" height="600"></canvas>
+  <p><kbd>WASD</kbd> move · <kbd>Mouse</kbd>/<kbd>← →</kbd> aim · <kbd>Click</kbd>/<kbd>Space</kbd> shoot · <kbd>R</kbd> restart</p>
+</main>
+<script>
+(() => {
+  const canvas = document.querySelector("#game");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height, FOV = Math.PI / 3;
+  const map = [
+    "################",
+    "#..............#",
+    "#..##......##..#",
+    "#..............#",
+    "#....#.........#",
+    "#....#..##.....#",
+    "#..............#",
+    "#..##......#...#",
+    "#..............#",
+    "#......##......#",
+    "#..............#",
+    "################"
+  ];
+  const keys = new Set();
+  let player, enemies, kills, flash, gameOver, won, lastTime, zbuffer;
+
+  function reset() {
+    player = { x: 2.5, y: 2.5, angle: 0, health: 100, hurt: 0 };
+    enemies = [
+      [7.5, 2.5], [12.5, 3.5], [5.5, 4.5], [10.5, 6.5],
+      [3.5, 8.5], [8.5, 8.5], [13.5, 9.5], [6.5, 10.2]
+    ].map(([x,y]) => ({x,y,hp:1,attack:0}));
+    kills = 0; flash = 0; gameOver = false; won = false;
+  }
+  reset();
+
+  function wall(x,y) {
+    const mx = Math.floor(x), my = Math.floor(y);
+    return !map[my] || map[my][mx] !== ".";
+  }
+  function moveTo(x,y) {
+    const r = .22;
+    if (!wall(x + Math.sign(x-player.x)*r, player.y)) player.x = x;
+    if (!wall(player.x, y + Math.sign(y-player.y)*r)) player.y = y;
+  }
+  function wallDistance(angle) {
+    const rx = Math.cos(angle), ry = Math.sin(angle);
+    let mx = Math.floor(player.x), my = Math.floor(player.y);
+    const ddx = Math.abs(1 / (rx || 1e-9)), ddy = Math.abs(1 / (ry || 1e-9));
+    const sx = rx < 0 ? -1 : 1, sy = ry < 0 ? -1 : 1;
+    let sxDist = (rx < 0 ? player.x-mx : mx+1-player.x) * ddx;
+    let syDist = (ry < 0 ? player.y-my : my+1-player.y) * ddy;
+    let side = 0, steps = 0;
+    while (steps++ < 40) {
+      if (sxDist < syDist) { sxDist += ddx; mx += sx; side = 0; }
+      else { syDist += ddy; my += sy; side = 1; }
+      if (!map[my] || map[my][mx] !== ".") break;
+    }
+    const distance = side === 0
+      ? (mx - player.x + (1-sx)/2) / (rx || 1e-9)
+      : (my - player.y + (1-sy)/2) / (ry || 1e-9);
+    return { distance: Math.max(.001, distance), side, mx, my };
+  }
+
+  function shoot() {
+    if (gameOver || won) { reset(); return; }
+    flash = 0.12;
+    let target = null, best = .13;
+    for (const e of enemies) {
+      if (e.hp <= 0) continue;
+      const dx = e.x-player.x, dy = e.y-player.y;
+      const dist = Math.hypot(dx,dy);
+      let diff = Math.atan2(dy,dx)-player.angle;
+      diff = Math.atan2(Math.sin(diff), Math.cos(diff));
+      const aim = Math.abs(diff) + Math.max(0, .035-dist*.003);
+      if (aim < best && wallDistance(player.angle + diff).distance > dist-.25) {
+        best = aim; target = e;
+      }
+    }
+    if (target) {
+      target.hp = 0; kills++;
+      if (kills === 8) won = true;
+    }
+  }
+
+  function update(dt) {
+    if (gameOver || won) return;
+    const turn = (keys.has("ArrowRight") ? 1 : 0) - (keys.has("ArrowLeft") ? 1 : 0);
+    player.angle += turn * 2.3 * dt;
+    const forward = (keys.has("w") || keys.has("W") || keys.has("ArrowUp") ? 1 : 0)
+                   - (keys.has("s") || keys.has("S") || keys.has("ArrowDown") ? 1 : 0);
+    const strafe = (keys.has("d") || keys.has("D") ? 1 : 0) - (keys.has("a") || keys.has("A") ? 1 : 0);
+    const speed = 3.0 * dt;
+    const dx = (Math.cos(player.angle)*forward + Math.cos(player.angle+Math.PI/2)*strafe)*speed;
+    const dy = (Math.sin(player.angle)*forward + Math.sin(player.angle+Math.PI/2)*strafe)*speed;
+    moveTo(player.x+dx, player.y+dy);
+
+    for (const e of enemies) {
+      if (e.hp <= 0) continue;
+      const dx = player.x-e.x, dy = player.y-e.y, dist = Math.hypot(dx,dy);
+      e.attack -= dt;
+      if (dist < 8 && dist > 1.25) {
+        const step = 0.7*dt, a = Math.atan2(dy,dx);
+        const nx = e.x+Math.cos(a)*step, ny = e.y+Math.sin(a)*step;
+        if (!wall(nx,e.y)) e.x=nx;
+        if (!wall(e.x,ny)) e.y=ny;
+      } else if (dist <= 1.25 && e.attack <= 0) {
+        player.health -= 12; player.hurt = .2; e.attack = .75;
+        if (player.health <= 0) gameOver = true;
+      }
+    }
+    flash = Math.max(0,flash-dt);
+    player.hurt = Math.max(0,player.hurt-dt);
+  }
+
+  function render() {
+    const cols = 480, strip = W/cols;
+    zbuffer = new Float32Array(cols);
+
+    const sky = ctx.createLinearGradient(0,0,0,H/2);
+    sky.addColorStop(0,"#17151f"); sky.addColorStop(1,"#61362e");
+    ctx.fillStyle=sky; ctx.fillRect(0,0,W,H/2);
+    const floor = ctx.createLinearGradient(0,H/2,0,H);
+    floor.addColorStop(0,"#49302a"); floor.addColorStop(1,"#171315");
+    ctx.fillStyle=floor; ctx.fillRect(0,H/2,W,H/2);
+
+    for (let i=0;i<cols;i++) {
+      const angle = player.angle + (i/cols-.5)*FOV;
+      const hit = wallDistance(angle);
+      const dist = hit.distance * Math.cos(angle-player.angle);
+      zbuffer[i]=dist;
+      const height = Math.min(H*2,H/(dist||.01));
+      const top = (H-height)/2;
+      const shade = Math.max(35, 205-dist*20-(hit.side?35:0));
+      const brick = ((hit.mx*7+hit.my*13)%3)*7;
+      ctx.fillStyle=`rgb(${shade+brick},${Math.max(20,shade*.58)},${Math.max(18,shade*.48)})`;
+      ctx.fillRect(i*strip,top,strip+1,height);
+      ctx.fillStyle="rgba(0,0,0,.13)";
+      if ((hit.mx+hit.my)%2===0) ctx.fillRect(i*strip,top+height*.48,strip+1,2);
+    }
+
+    const alive = enemies.filter(e=>e.hp>0).sort((a,b)=>
+      Math.hypot(b.x-player.x,b.y-player.y)-Math.hypot(a.x-player.x,a.y-player.y));
+    for (const e of alive) {
+      const dx=e.x-player.x,dy=e.y-player.y,dist=Math.hypot(dx,dy);
+      const rel=Math.atan2(Math.sin(Math.atan2(dy,dx)-player.angle),
+                           Math.cos(Math.atan2(dy,dx)-player.angle));
+      if (Math.abs(rel)>FOV*.7 || dist<.2) continue;
+      const sx=(.5+rel/FOV)*W, size=Math.min(H,H/(dist||.1)*.72);
+      const sy=H/2, left=Math.floor((sx-size*.28)/strip), right=Math.ceil((sx+size*.28)/strip);
+      const center=Math.max(0,Math.min(cols-1,Math.floor(sx/strip)));
+      if (dist > zbuffer[center]+.2) continue;
+      ctx.save();
+      ctx.translate(sx,sy); ctx.scale(size/100,size/100);
+      ctx.fillStyle="#2a1015";
+      ctx.beginPath(); ctx.ellipse(0,16,24,39,0,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle="#a72d27";
+      ctx.beginPath(); ctx.ellipse(0,15,20,34,0,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle="#e24930";
+      ctx.beginPath(); ctx.moveTo(-17,-9); ctx.lineTo(-27,-34); ctx.lineTo(-7,-22);
+      ctx.lineTo(0,-29); ctx.lineTo(8,-22); ctx.lineTo(27,-34); ctx.lineTo(18,-7);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle="#ffe38a";
+      ctx.fillRect(-13,-3,8,5); ctx.fillRect(5,-3,8,5);
+      ctx.fillStyle="#211318"; ctx.fillRect(-10,-2,3,3); ctx.fillRect(8,-2,3,3);
+      ctx.fillStyle="#531a1e"; ctx.fillRect(-7,12,14,4);
+      ctx.restore();
+    }
+
+    ctx.strokeStyle="#fff4d0"; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(W/2-9,H/2); ctx.lineTo(W/2-3,H/2);
+    ctx.moveTo(W/2+3,H/2); ctx.lineTo(W/2+9,H/2);
+    ctx.moveTo(W/2,H/2-9); ctx.lineTo(W/2,H/2-3);
+    ctx.moveTo(W/2,H/2+3); ctx.lineTo(W/2,H/2+9); ctx.stroke();
+    ctx.fillStyle="#29252b"; ctx.fillRect(W/2-72,H-105,144,105);
+    ctx.fillStyle="#77717a"; ctx.fillRect(W/2-43,H-92,86,92);
+    ctx.fillStyle="#aaa2a0"; ctx.fillRect(W/2-17,H-117,34,52);
+    ctx.fillStyle="#3c353b"; ctx.fillRect(W/2-10,H-115,20,38);
+    if (flash>0) {
+      ctx.fillStyle="#ffe58a"; ctx.beginPath();
+      ctx.moveTo(W/2,H-125); ctx.lineTo(W/2-36,H-171);
+      ctx.lineTo(W/2-10,H-160); ctx.lineTo(W/2,H-202);
+      ctx.lineTo(W/2+13,H-159); ctx.lineTo(W/2+38,H-173);
+      ctx.closePath(); ctx.fill();
+    }
+
+    ctx.fillStyle="rgba(0,0,0,.55)"; ctx.fillRect(14,14,240,64);
+    ctx.fillStyle="#fff"; ctx.font="bold 20px system-ui";
+    ctx.fillText(`HEALTH ${Math.max(0,player.health)}`,26,42);
+    ctx.fillStyle="#ff4938"; ctx.fillText(`DEMONS ${kills}/8`,26,67);
+    if (player.hurt>0) { ctx.fillStyle=`rgba(255,0,0,${player.hurt})`; ctx.fillRect(0,0,W,H); }
+
+    if (gameOver || won) {
+      ctx.fillStyle="rgba(0,0,0,.72)"; ctx.fillRect(0,0,W,H);
+      ctx.textAlign="center"; ctx.fillStyle=won?"#ffe38a":"#ff4938";
+      ctx.font="bold 52px system-ui";
+      ctx.fillText(won?"YOU WIN. TYLER LOSES.":"YOU GOT BONKED.",W/2,H/2-10);
+      ctx.fillStyle="#fff"; ctx.font="20px system-ui";
+      ctx.fillText("Press R or click to play again",W/2,H/2+34);
+      ctx.textAlign="left";
+    }
+  }
+
+  let previous=performance.now();
+  function loop(now) {
+    const dt=Math.min(.04,(now-previous)/1000); previous=now;
+    update(dt); render(); requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  window.addEventListener("keydown", e => {
+    keys.add(e.key);
+    if ([" ","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key)) e.preventDefault();
+    if (e.key===" " && !e.repeat) shoot();
+    if ((e.key==="r"||e.key==="R") && (gameOver||won)) reset();
+  });
+  window.addEventListener("keyup", e => keys.delete(e.key));
+  canvas.addEventListener("click", () => {
+    if (gameOver||won) reset();
+    else { canvas.requestPointerLock?.(); shoot(); }
+  });
+  document.addEventListener("mousemove", e => {
+    if (document.pointerLockElement===canvas) player.angle += e.movementX*.0025;
+  });
+})();
+</script>
+</html>
